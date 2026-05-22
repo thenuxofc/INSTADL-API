@@ -2,127 +2,94 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 
 exports.handler = async (event) => {
-  const instaUrl = event.queryStringParameters?.url;
+  const igUrl = event.queryStringParameters?.url;
 
-  if (!instaUrl) {
-    return response({
+  if (!igUrl) {
+    return send({
+      creator: "THENUX",
       success: false,
-      error: "Instagram URL required"
+      error: "Missing url. Use ?url=INSTAGRAM_URL"
     });
   }
 
   try {
-    const BASE = "https://en1.savefrom.net";
-    const PAGE = `${BASE}/25-instagram-reels-download-4GZ.html`;
-
-    // REAL BROWSER HEADERS
-    const browserHeaders = {
-      "accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "max-age=0",
-      "priority": "u=0, i",
-      "sec-ch-ua":
-        `"Google Chrome";v="148", "Chromium";v="148", "Not/A)Brand";v="99"`,
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": `"Windows"`,
-      "sec-fetch-dest": "document",
-      "sec-fetch-mode": "navigate",
-      "sec-fetch-site": "same-origin",
-      "sec-fetch-user": "?1",
-      "upgrade-insecure-requests": "1",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-    };
-
-    // 1. OPEN PAGE FIRST
-    const warm = await axios.get(PAGE, {
-      headers: browserHeaders,
-      withCredentials: true,
-      validateStatus: () => true
-    });
-
-    // GET COOKIES
-    const cookies = warm.headers["set-cookie"]
-      ? warm.headers["set-cookie"]
-          .map(c => c.split(";")[0])
-          .join("; ")
-      : "";
-
-    // 2. CREATE FORM
-    const form = new URLSearchParams();
-    form.append("sf_url", instaUrl);
-    form.append("sf_submit", "");
-    form.append("new", "2");
-    form.append("lang", "en");
-    form.append("app", "");
-    form.append("country", "lk");
-    form.append("os", "Windows");
-    form.append("browser", "Chrome");
-    form.append("channel", "main");
-
-    // 3. SEND REAL FORM REQUEST
-    const res = await axios.post(
-      `${BASE}/savefrom.php`,
-      form.toString(),
+    const { data } = await axios.post(
+      "https://sssreels.com/api/download",
+      { url: igUrl },
       {
+        timeout: 30000,
         headers: {
-          ...browserHeaders,
-          "content-type": "application/x-www-form-urlencoded",
-          "origin": BASE,
-          "referer": PAGE,
-          "cookie": cookies,
-          "x-requested-with": "XMLHttpRequest"
-        },
-        maxRedirects: 5,
-        validateStatus: () => true
+          "accept": "application/json, text/plain, */*",
+          "content-type": "application/json",
+          "origin": "https://sssreels.com",
+          "referer": "https://sssreels.com/",
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+          "sec-ch-ua": `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"`,
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": `"Windows"`
+        }
       }
     );
 
-    if (res.status === 403) {
-      return response({
-        success: false,
-        error: "Still blocked by SaveFrom anti-bot protection",
-        status: 403
-      });
-    }
-
-    const html = res.data;
+    const html = typeof data === "string" ? data : data?.html || JSON.stringify(data);
     const $ = cheerio.load(html);
 
-    const title =
-      $(".row.title").attr("title") ||
-      $(".row.title").text().trim();
+    const username = $("h2").first().text().trim() || null;
+    const caption = $("b").first().text().trim() || null;
 
-    const thumbnail = $("img.thumb").attr("src");
+    const thumbnailPath =
+      $("img.result_author").attr("src") ||
+      $(".result_overlay").css("background-image")?.match(/url\(["']?(.*?)["']?\)/)?.[1];
 
     const downloads = [];
 
-    $("a.link-download").each((i, el) => {
+    $("a.download_link").each((_, el) => {
+      const text = $(el).text().trim();
+      const href = $(el).attr("href");
+      if (!href) return;
+
+      const fullUrl = absolute(href);
+
       downloads.push({
-        quality: $(el).attr("data-quality"),
-        type: $(el).attr("data-type"),
-        url: decode($(el).attr("href"))
+        label: text,
+        type: text.toLowerCase().includes("mp3") ? "mp3" : "mp4",
+        proxy_url: fullUrl,
+        direct_url: decodeCdn(fullUrl)
       });
     });
 
-    return response({
+    if (!downloads.length) {
+      return send({
+        creator: "THENUX",
+        success: false,
+        error: "No download links found",
+        raw: html.slice(0, 500)
+      });
+    }
+
+    return send({
       creator: "THENUX",
       success: true,
-      title,
-      thumbnail,
+      source: igUrl,
+      username,
+      caption,
+      thumbnail: thumbnailPath ? absolute(thumbnailPath) : null,
+      thumbnail_direct: thumbnailPath ? decodeCdn(absolute(thumbnailPath)) : null,
+      best: downloads.find(x => x.type === "mp4") || downloads[0],
       downloads
     });
 
   } catch (e) {
-    return response({
+    return send({
+      creator: "THENUX",
       success: false,
       error: e.message
     });
   }
 };
 
-function response(data) {
+function send(data) {
   return {
     statusCode: 200,
     headers: {
@@ -133,6 +100,20 @@ function response(data) {
   };
 }
 
-function decode(str = "") {
-  return str.replace(/&amp;/g, "&");
+function absolute(url) {
+  if (!url) return null;
+  if (url.startsWith("http")) return url;
+  return `https://sssreels.com${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+function decodeCdn(url) {
+  try {
+    const u = new URL(url);
+    const encoded = u.searchParams.get("url");
+    if (!encoded) return url;
+
+    return Buffer.from(encoded, "base64").toString("utf8");
+  } catch {
+    return url;
+  }
 }
