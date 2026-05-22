@@ -1,52 +1,55 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const CREATOR = "THENUX";
-const BASE = "https://en1.savefrom.net";
-const PAGE = `${BASE}/25-instagram-reels-download-4GZ.html`;
-const POST = `${BASE}/savefrom.php`;
-
 exports.handler = async (event) => {
   const instaUrl = event.queryStringParameters?.url;
 
   if (!instaUrl) {
-    return send(400, {
-      creator: CREATOR,
+    return response({
       success: false,
-      error: "Missing url parameter"
+      error: "Instagram URL required"
     });
   }
 
   try {
-    const client = axios.create({
-      timeout: 30000,
-      maxRedirects: 5,
+    const BASE = "https://en1.savefrom.net";
+    const PAGE = `${BASE}/25-instagram-reels-download-4GZ.html`;
+
+    // REAL BROWSER HEADERS
+    const browserHeaders = {
+      "accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "max-age=0",
+      "priority": "u=0, i",
+      "sec-ch-ua":
+        `"Google Chrome";v="148", "Chromium";v="148", "Not/A)Brand";v="99"`,
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": `"Windows"`,
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    };
+
+    // 1. OPEN PAGE FIRST
+    const warm = await axios.get(PAGE, {
+      headers: browserHeaders,
+      withCredentials: true,
       validateStatus: () => true
     });
 
-    const commonHeaders = {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-      "accept-language": "en-US,en;q=0.9,si;q=0.8",
-      "sec-ch-ua": `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"`,
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": `"Windows"`
-    };
-
-    // 1. Warm request to get cookies
-    const warm = await client.get(PAGE, {
-      headers: {
-        ...commonHeaders,
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        referer: "https://www.google.com/"
-      }
-    });
-
+    // GET COOKIES
     const cookies = warm.headers["set-cookie"]
-      ? warm.headers["set-cookie"].map((c) => c.split(";")[0]).join("; ")
+      ? warm.headers["set-cookie"]
+          .map(c => c.split(";")[0])
+          .join("; ")
       : "";
 
+    // 2. CREATE FORM
     const form = new URLSearchParams();
     form.append("sf_url", instaUrl);
     form.append("sf_submit", "");
@@ -56,101 +59,80 @@ exports.handler = async (event) => {
     form.append("country", "lk");
     form.append("os", "Windows");
     form.append("browser", "Chrome");
-    form.append("channel", "article");
+    form.append("channel", "main");
 
-    // 2. Submit downloader form
-    const res = await client.post(POST, form.toString(), {
-      headers: {
-        ...commonHeaders,
-        accept: "*/*",
-        "content-type": "application/x-www-form-urlencoded",
-        origin: BASE,
-        referer: PAGE,
-        cookie: cookies,
-        "x-requested-with": "XMLHttpRequest"
+    // 3. SEND REAL FORM REQUEST
+    const res = await axios.post(
+      `${BASE}/savefrom.php`,
+      form.toString(),
+      {
+        headers: {
+          ...browserHeaders,
+          "content-type": "application/x-www-form-urlencoded",
+          "origin": BASE,
+          "referer": PAGE,
+          "cookie": cookies,
+          "x-requested-with": "XMLHttpRequest"
+        },
+        maxRedirects: 5,
+        validateStatus: () => true
       }
-    });
+    );
 
     if (res.status === 403) {
-      return send(403, {
-        creator: CREATOR,
+      return response({
         success: false,
-        error:
-          "SaveFrom blocked Netlify server IP. This is external site protection, not your code bug.",
-        fix:
-          "Try redeploy, use another backend like Cloudflare Worker/VPS, or use a real Instagram downloader provider."
+        error: "Still blocked by SaveFrom anti-bot protection",
+        status: 403
       });
     }
 
-    const html = String(res.data || "");
+    const html = res.data;
     const $ = cheerio.load(html);
 
     const title =
       $(".row.title").attr("title") ||
-      $(".row.title").text().trim() ||
-      "Instagram Video";
+      $(".row.title").text().trim();
 
-    const thumbnail = decode($("img.thumb").attr("src") || "");
+    const thumbnail = $("img.thumb").attr("src");
 
     const downloads = [];
 
     $("a.link-download").each((i, el) => {
-      const href = $(el).attr("href");
-      if (!href) return;
-
       downloads.push({
-        quality:
-          $(el).attr("data-quality") ||
-          $(el).find(".subname").text().trim() ||
-          "unknown",
-        type: $(el).attr("data-type") || "mp4",
-        url: decode(href)
+        quality: $(el).attr("data-quality"),
+        type: $(el).attr("data-type"),
+        url: decode($(el).attr("href"))
       });
     });
 
-    if (!downloads.length) {
-      return send(404, {
-        creator: CREATOR,
-        success: false,
-        error: "No video links found",
-        status: res.status
-      });
-    }
-
-    return send(200, {
-      creator: CREATOR,
+    return response({
+      creator: "THENUX",
       success: true,
       title,
       thumbnail,
-      total: downloads.length,
-      best: downloads[0],
       downloads
     });
-  } catch (err) {
-    return send(500, {
-      creator: CREATOR,
+
+  } catch (e) {
+    return response({
       success: false,
-      error: err.message
+      error: e.message
     });
   }
 };
 
-function send(statusCode, body) {
+function response(data) {
   return {
-    statusCode,
+    statusCode: 200,
     headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
     },
-    body: JSON.stringify(body, null, 2)
+    body: JSON.stringify(data, null, 2)
   };
 }
 
 function decode(str = "") {
-  return str
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, `"`)
-    .replace(/&#039;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+  return str.replace(/&amp;/g, "&");
 }
