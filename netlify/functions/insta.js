@@ -7,24 +7,48 @@ const PAGE = `${BASE}/25-instagram-reels-download-4GZ.html`;
 const POST = `${BASE}/savefrom.php`;
 
 exports.handler = async (event) => {
-  const url = event.queryStringParameters?.url;
+  const instaUrl = event.queryStringParameters?.url;
 
-  const headers = {
-    "Access-Control-Allow-Origin": "*",
-    "Content-Type": "application/json"
-  };
-
-  if (!url || !url.includes("instagram.com")) {
-    return json(headers, 400, {
+  if (!instaUrl) {
+    return send(400, {
       creator: CREATOR,
       success: false,
-      error: "Instagram URL required. Example: /api/insta?url=https://www.instagram.com/reel/xxxx/"
+      error: "Missing url parameter"
     });
   }
 
   try {
+    const client = axios.create({
+      timeout: 30000,
+      maxRedirects: 5,
+      validateStatus: () => true
+    });
+
+    const commonHeaders = {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+      "accept-language": "en-US,en;q=0.9,si;q=0.8",
+      "sec-ch-ua": `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"`,
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": `"Windows"`
+    };
+
+    // 1. Warm request to get cookies
+    const warm = await client.get(PAGE, {
+      headers: {
+        ...commonHeaders,
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        referer: "https://www.google.com/"
+      }
+    });
+
+    const cookies = warm.headers["set-cookie"]
+      ? warm.headers["set-cookie"].map((c) => c.split(";")[0]).join("; ")
+      : "";
+
     const form = new URLSearchParams();
-    form.append("sf_url", url);
+    form.append("sf_url", instaUrl);
     form.append("sf_submit", "");
     form.append("new", "2");
     form.append("lang", "en");
@@ -34,19 +58,31 @@ exports.handler = async (event) => {
     form.append("browser", "Chrome");
     form.append("channel", "article");
 
-    const { data: html } = await axios.post(POST, form.toString(), {
-      timeout: 30000,
+    // 2. Submit downloader form
+    const res = await client.post(POST, form.toString(), {
       headers: {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9,si;q=0.8",
+        ...commonHeaders,
+        accept: "*/*",
         "content-type": "application/x-www-form-urlencoded",
-        "origin": BASE,
-        "referer": PAGE,
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        origin: BASE,
+        referer: PAGE,
+        cookie: cookies,
+        "x-requested-with": "XMLHttpRequest"
       }
     });
 
+    if (res.status === 403) {
+      return send(403, {
+        creator: CREATOR,
+        success: false,
+        error:
+          "SaveFrom blocked Netlify server IP. This is external site protection, not your code bug.",
+        fix:
+          "Try redeploy, use another backend like Cloudflare Worker/VPS, or use a real Instagram downloader provider."
+      });
+    }
+
+    const html = String(res.data || "");
     const $ = cheerio.load(html);
 
     const title =
@@ -54,42 +90,44 @@ exports.handler = async (event) => {
       $(".row.title").text().trim() ||
       "Instagram Video";
 
-    const thumbnail = $(".thumb-box img.thumb").attr("src") || null;
+    const thumbnail = decode($("img.thumb").attr("src") || "");
 
     const downloads = [];
 
-    $("a.link-download").each((_, el) => {
+    $("a.link-download").each((i, el) => {
       const href = $(el).attr("href");
       if (!href) return;
 
       downloads.push({
-        quality: $(el).attr("data-quality") || $(el).find(".subname").text().trim() || "unknown",
+        quality:
+          $(el).attr("data-quality") ||
+          $(el).find(".subname").text().trim() ||
+          "unknown",
         type: $(el).attr("data-type") || "mp4",
-        url: decodeHtml(href),
-        filename: cleanFileName($(el).attr("download") || `${title}.mp4`)
+        url: decode(href)
       });
     });
 
     if (!downloads.length) {
-      return json(headers, 502, {
+      return send(404, {
         creator: CREATOR,
         success: false,
-        error: "No downloadable video found. Link may be private, expired, or SaveFrom blocked the request."
+        error: "No video links found",
+        status: res.status
       });
     }
 
-    return json(headers, 200, {
+    return send(200, {
       creator: CREATOR,
       success: true,
-      source: url,
       title,
-      thumbnail: thumbnail ? decodeHtml(thumbnail) : null,
+      thumbnail,
       total: downloads.length,
       best: downloads[0],
       downloads
     });
   } catch (err) {
-    return json(headers, 500, {
+    return send(500, {
       creator: CREATOR,
       success: false,
       error: err.message
@@ -97,26 +135,22 @@ exports.handler = async (event) => {
   }
 };
 
-function json(headers, statusCode, body) {
+function send(statusCode, body) {
   return {
     statusCode,
-    headers,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body, null, 2)
   };
 }
 
-function decodeHtml(str = "") {
+function decode(str = "") {
   return str
     .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
+    .replace(/&quot;/g, `"`)
     .replace(/&#039;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
-}
-
-function cleanFileName(name = "instagram-video.mp4") {
-  return name
-    .replace(/[\\/:*?"<>|]/g, "")
-    .replace(/\s+/g, " ")
-    .slice(0, 120);
 }
